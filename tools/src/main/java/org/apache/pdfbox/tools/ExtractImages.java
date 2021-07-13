@@ -90,6 +90,10 @@ public final class ExtractImages implements Callable<Integer>
         "regardless of colorspace or masking.")    
     private boolean useDirectJPEG;
 
+    @Option(names = "-includeDensity", description = "Include picture density " +
+            "calculated from scale in PDF. (does not work with -useDirectJPEG or -noColorConvert")
+    private boolean includeDensity;
+
     @Option(names = "-noColorConvert", description = "Images are extracted with their " +
         "original colorspace if possible.")    
     private boolean noColorConvert;
@@ -205,7 +209,7 @@ public final class ExtractImages implements Callable<Integer>
             String name = prefix + "-" + imageCounter;
             imageCounter++;
 
-            write2file(pdImage, name, useDirectJPEG, noColorConvert);
+            write2file(pdImage, name, useDirectJPEG, noColorConvert, includeDensity);
         }
 
         @Override
@@ -327,8 +331,29 @@ public final class ExtractImages implements Callable<Integer>
          * @throws IOException When something is wrong with the corresponding file.
          */
         private void write2file(PDImage pdImage, String prefix, boolean directJPEG,
-                boolean noColorConvert) throws IOException
+                boolean noColorConvert, boolean includeDensity) throws IOException
         {
+            Matrix ctm = getGraphicsState().getCurrentTransformationMatrix();
+            float imageScale = ctm.getScalingFactorX() + ctm.getScalingFactorY();
+            int dpi = (int) ((pdImage.getWidth() + pdImage.getHeight()) * 72 / imageScale);
+
+//          Round calculated dpi to nearest credible scanning resolution
+//          This table hasn't been thoroughly tested, only with a big document containing many little 200 dpi pictures.
+//          Should it be user configurable, like with a list in a command-line parameter of nearest values to stick to?
+
+//          As the used writeImage method doesn't support separate X and Y dpi fax dpi's like 203x98 aren't included
+//          anyway and need a separate construction. The upcoming apache.commons.imaging could provide for
+//          a lossless, more speedy alternative for modifying metadata density chunks like EXIF JFIF & PhYS, or would
+//          including an external tool like mogrify/identify from ImageMagick be acceptable?
+
+            switch (dpi){
+                case 599 : dpi = 600; break;
+                case 299 : dpi = 300; break;
+                case 199 : dpi = 200; break;
+                case 149 : dpi = 150; break;
+                case 99  : dpi = 100; break;
+            }
+
             String suffix = pdImage.getSuffix();
             if (suffix == null || "jb2".equals(suffix))
             {
@@ -364,7 +389,7 @@ public final class ExtractImages implements Callable<Integer>
                     try (FileOutputStream imageOutput = new FileOutputStream(prefix + "." + suffix))
                     {
                         SYSOUT.println("Writing image: " + prefix + "." + suffix);
-                        ImageIOUtil.writeImage(image, suffix, imageOutput);
+                        ImageIOUtil.writeImage(image, suffix, imageOutput, dpi);
                         imageOutput.flush();
                     }
                     return;
@@ -378,9 +403,9 @@ public final class ExtractImages implements Callable<Integer>
                 if ("jpg".equals(suffix))
                 {
                     String colorSpaceName = pdImage.getColorSpace().getName();
-                    if (directJPEG || 
+                    if (!includeDensity && (directJPEG ||
                         (PDDeviceGray.INSTANCE.getName().equals(colorSpaceName) ||
-                         PDDeviceRGB.INSTANCE.getName().equals(colorSpaceName)))
+                         PDDeviceRGB.INSTANCE.getName().equals(colorSpaceName))))
                     {
                         // RGB or Gray colorspace: get and write the unmodified JPEG stream
                         InputStream data = pdImage.createInputStream(JPEG);
@@ -393,16 +418,16 @@ public final class ExtractImages implements Callable<Integer>
                         BufferedImage image = pdImage.getImage();
                         if (image != null)
                         {
-                            ImageIOUtil.writeImage(image, suffix, imageOutput);
+                            ImageIOUtil.writeImage(image, suffix, imageOutput, dpi);
                         }
                     }
                 }
                 else if ("jp2".equals(suffix))
                 {
                     String colorSpaceName = pdImage.getColorSpace().getName();
-                    if (directJPEG
+                    if (!includeDensity && (directJPEG
                             || (PDDeviceGray.INSTANCE.getName().equals(colorSpaceName)
-                            || PDDeviceRGB.INSTANCE.getName().equals(colorSpaceName)))
+                            || PDDeviceRGB.INSTANCE.getName().equals(colorSpaceName))))
                     {
                         // RGB or Gray colorspace: get and write the unmodified JPEG2000 stream
                         InputStream data = pdImage.createInputStream(
@@ -416,7 +441,7 @@ public final class ExtractImages implements Callable<Integer>
                         BufferedImage image = pdImage.getImage();
                         if (image != null)
                         {
-                            ImageIOUtil.writeImage(image, "jpeg2000", imageOutput);
+                            ImageIOUtil.writeImage(image, "jpeg2000", imageOutput, dpi);
                         }
                     }
                 }
@@ -441,14 +466,14 @@ public final class ExtractImages implements Callable<Integer>
                             bitonalImage.setRGB(x, y, image.getRGB(x, y));
                         }
                     }
-                    ImageIOUtil.writeImage(bitonalImage, suffix, imageOutput);
+                    ImageIOUtil.writeImage(bitonalImage, suffix, imageOutput, dpi);
                 }
                 else
                 {
                     BufferedImage image = pdImage.getImage();
                     if (image != null)
                     {
-                        ImageIOUtil.writeImage(image, suffix, imageOutput);
+                        ImageIOUtil.writeImage(image, suffix, imageOutput, dpi);
                     }
                 }
                 imageOutput.flush();
