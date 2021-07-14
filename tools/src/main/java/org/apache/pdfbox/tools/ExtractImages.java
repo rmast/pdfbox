@@ -46,6 +46,7 @@ import org.apache.pdfbox.pdmodel.graphics.image.PDImageXObject;
 import org.apache.pdfbox.pdmodel.graphics.pattern.PDAbstractPattern;
 import org.apache.pdfbox.pdmodel.graphics.pattern.PDTilingPattern;
 import org.apache.pdfbox.pdmodel.graphics.state.PDExtendedGraphicsState;
+import org.apache.pdfbox.pdmodel.graphics.state.PDGraphicsState;
 import org.apache.pdfbox.pdmodel.graphics.state.PDSoftMask;
 import org.apache.pdfbox.pdmodel.graphics.state.RenderingMode;
 import org.apache.pdfbox.tools.imageio.ImageIOUtil;
@@ -64,12 +65,14 @@ public final class ExtractImages
     private static final String PREFIX = "-prefix";
     private static final String DIRECTJPEG = "-directJPEG";
     private static final String NOCOLORCONVERT = "-noColorConvert";
+    private static final String INCLUDEDENSITY = "-includeDensity";
 
     private static final List<String> JPEG = Arrays.asList(
             COSName.DCT_DECODE.getName(),
             COSName.DCT_DECODE_ABBREVIATION.getName());
 
     private boolean useDirectJPEG;
+    private boolean includeDensity;
     private boolean noColorConvert;
     private String filePrefix;
 
@@ -134,6 +137,10 @@ public final class ExtractImages
                 {
                     noColorConvert = true;
                 }
+                else if (args[i].equals(INCLUDEDENSITY))
+                {
+                    includeDensity = true;
+                }
                 else
                 {
                     if (pdfFile == null)
@@ -171,8 +178,10 @@ public final class ExtractImages
                 + "                           regardless of colorspace or masking\n"
                 + "  -noColorConvert        : Images are extracted with their \n"
                 + "                           original colorspace if possible.\n"
+                + "  -includeDensity        : Include picture density calculated from scale in PDF.\n"
+                + "                           (does not work with -useDirectJPEG or -noColorConvert)\n"
                 + "  <inputfile>            : The PDF document to use\n";
-        
+
         System.err.println(message);
         System.exit(1);
     }
@@ -225,7 +234,7 @@ public final class ExtractImages
                 PDExtendedGraphicsState extGState = res.getExtGState(name);
                 if (extGState == null)
                 {
-                    // can happen if key exists but no value 
+                    // can happen if key exists but no value
                     continue;
                 }
                 PDSoftMask softMask = extGState.getSoftMask();
@@ -265,40 +274,39 @@ public final class ExtractImages
             String name = filePrefix + "-" + imageCounter;
             imageCounter++;
 
-            System.out.println("Writing image: " + name);
-            write2file(pdImage, name, useDirectJPEG, noColorConvert);
+            write2file(pdImage, name, useDirectJPEG, noColorConvert, includeDensity);
         }
 
         @Override
         public void appendRectangle(Point2D p0, Point2D p1, Point2D p2, Point2D p3)
                 throws IOException
         {
-
+            // Empty: add special handling if needed
         }
 
         @Override
         public void clip(int windingRule) throws IOException
         {
-
+            // Empty: add special handling if needed
         }
 
         @Override
         public void moveTo(float x, float y) throws IOException
         {
-
+            // Empty: add special handling if needed
         }
 
         @Override
         public void lineTo(float x, float y) throws IOException
         {
-
+            // Empty: add special handling if needed
         }
 
         @Override
         public void curveTo(float x1, float y1, float x2, float y2, float x3, float y3)
                 throws IOException
         {
-
+            // Empty: add special handling if needed
         }
 
         @Override
@@ -310,17 +318,17 @@ public final class ExtractImages
         @Override
         public void closePath() throws IOException
         {
-
+            // Empty: add special handling if needed
         }
 
         @Override
         public void endPath() throws IOException
         {
-
+            // Empty: add special handling if needed
         }
 
         @Override
-        protected void showGlyph(Matrix textRenderingMatrix, 
+        protected void showGlyph(Matrix textRenderingMatrix,
                                  PDFont font,
                                  int code,
                                  Vector displacement) throws IOException
@@ -357,7 +365,7 @@ public final class ExtractImages
         @Override
         public void shadingFill(COSName shadingName) throws IOException
         {
-
+            // Empty: add special handling if needed
         }
 
         // find out if it is a tiling pattern, then process that one
@@ -387,8 +395,29 @@ public final class ExtractImages
          * @throws IOException When something is wrong with the corresponding file.
          */
         private void write2file(PDImage pdImage, String prefix, boolean directJPEG,
-                boolean noColorConvert) throws IOException
+                                boolean noColorConvert, boolean includeDensity) throws IOException
         {
+            Matrix ctm = getGraphicsState().getCurrentTransformationMatrix();
+            float imageScale = ctm.getScalingFactorX() + ctm.getScalingFactorY();
+            int dpi = (int) ((pdImage.getWidth() + pdImage.getHeight()) * 72 / imageScale);
+
+//          Round calculated dpi to nearest credible scanning resolution
+//          This table hasn't been thoroughly tested, only with a big document containing many little 200 dpi pictures.
+//          Should it be user configurable, like with a list in a command-line parameter of nearest values to stick to?
+
+//          As the used writeImage method doesn't support separate X and Y dpi fax dpi's like 203x98 aren't included
+//          anyway and need a separate construction. The upcoming apache.commons.imaging could provide for
+//          a lossless, more speedy alternative for modifying metadata density chunks like EXIF JFIF & PhYS, or would
+//          including an external tool like mogrify/identify from ImageMagick be acceptable?
+
+            switch (dpi){
+                case 599 : dpi = 600; break;
+                case 299 : dpi = 300; break;
+                case 199 : dpi = 200; break;
+                case 149 : dpi = 150; break;
+                case 99  : dpi = 100; break;
+            }
+
             String suffix = pdImage.getSuffix();
             if (suffix == null || "jb2".equals(suffix))
             {
@@ -425,7 +454,7 @@ public final class ExtractImages
                             suffix = "tiff";
                         }
                         out = new FileOutputStream(prefix + "." + suffix);
-                        ImageIOUtil.writeImage(image, suffix, out);
+                        ImageIOUtil.writeImage(image, suffix, out, dpi);
                         out.flush();
                         out.close();
                         return;
@@ -436,9 +465,9 @@ public final class ExtractImages
                 if ("jpg".equals(suffix))
                 {
                     String colorSpaceName = pdImage.getColorSpace().getName();
-                    if (directJPEG
+                    if (!includeDensity && (directJPEG
                             || (PDDeviceGray.INSTANCE.getName().equals(colorSpaceName)
-                            || PDDeviceRGB.INSTANCE.getName().equals(colorSpaceName)))
+                            || PDDeviceRGB.INSTANCE.getName().equals(colorSpaceName))))
                     {
                         // RGB or Gray colorspace: get and write the unmodified JPEG stream
                         InputStream data = pdImage.createInputStream(JPEG);
@@ -451,16 +480,16 @@ public final class ExtractImages
                         BufferedImage image = pdImage.getImage();
                         if (image != null)
                         {
-                            ImageIOUtil.writeImage(image, suffix, out);
+                            ImageIOUtil.writeImage(image, suffix, out, dpi);
                         }
                     }
                 }
                 else if ("jp2".equals(suffix))
                 {
                     String colorSpaceName = pdImage.getColorSpace().getName();
-                    if (directJPEG || 
+                    if (!includeDensity && (directJPEG ||
                         (PDDeviceGray.INSTANCE.getName().equals(colorSpaceName) ||
-                         PDDeviceRGB.INSTANCE.getName().equals(colorSpaceName)))
+                         PDDeviceRGB.INSTANCE.getName().equals(colorSpaceName))))
                     {
                         // RGB or Gray colorspace: get and write the unmodified JPEG2000 stream
                         InputStream data = pdImage.createInputStream(
@@ -474,7 +503,7 @@ public final class ExtractImages
                         BufferedImage image = pdImage.getImage();
                         if (image != null)
                         {
-                            ImageIOUtil.writeImage(image, "jpeg2000", out);
+                            ImageIOUtil.writeImage(image, "jpeg2000", out, dpi);
                         }
                     }
                 }
@@ -499,14 +528,14 @@ public final class ExtractImages
                             bitonalImage.setRGB(x, y, image.getRGB(x, y));
                         }
                     }
-                    ImageIOUtil.writeImage(bitonalImage, suffix, out);
+                    ImageIOUtil.writeImage(bitonalImage, suffix, out, dpi);
                 }
                 else
                 {
                     BufferedImage image = pdImage.getImage();
                     if (image != null)
                     {
-                        ImageIOUtil.writeImage(image, suffix, out);
+                        ImageIOUtil.writeImage(image, suffix, out, dpi);
                     }
                 }
                 out.flush();
